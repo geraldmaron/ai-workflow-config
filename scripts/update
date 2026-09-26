@@ -1,0 +1,14 @@
+#!/usr/bin/env zsh
+# Pull the latest repo and re-run the install with the same safety rails.
+# Usage: update [--dry-run] [any other ./install option]
+
+set -euo pipefail
+source "$(dirname "${(%):-%x}")/lib.sh"
+
+if [[ "${1:-}" != "--dry-run" ]]; then
+  git -C "$REPO_ROOT" pull --ff-only
+else
+  git -C "$REPO_ROOT" fetch --quiet
+  log "dry run: would fast-forward to $(git -C "$REPO_ROOT" rev-parse --short '@{u}')"
+fi
+exec "$REPO_ROOT/install" "$@"

@@ -1,0 +1,85 @@
+#!/usr/bin/env zsh
+# Lint the skills library, deploy it to every detected tool's skill root, and
+# sync core/GLOBAL.md into every detected tool. Run by ./install and
+# scripts/update; safe to run on its own at any time.
+# Usage: deploy [--dry-run]
+
+set -euo pipefail
+source "$(dirname "${(%):-%x}")/lib.sh"
+
+DRY_RUN=0
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+
+log "== ai-workflow-config deploy =="
+log "repo: $REPO_ROOT"
+
+deploy_skills() {
+  local dest_root="$1" label="$2"
+  local dest_expanded skill_dir name target existing
+  dest_expanded=$(expand_path "$dest_root")
+
+  # Safety rail: everything below removes directories, so refuse to operate on
+  # anything that isn't an explicitly-named skills root.
+  [[ "$dest_expanded" == */skills ]] || die "refusing to deploy skills to '$dest_expanded' (must end in /skills)"
+
+  for skill_dir in "$REPO_ROOT"/skills/*/(N); do
+    name=$(basename "${skill_dir%/}")
+    target="$dest_expanded/$name"
+    if (( DRY_RUN )); then
+      log "would deploy skill '$name' -> $target ($label)"
+      continue
+    fi
+    mkdir -p "$dest_expanded"
+    backup_path "$target"
+    rm -rf "$target"
+    # Copy the whole directory, not just SKILL.md: a skill may carry
+    # references/, scripts/, or templates that it loads on demand.
+    cp -R "${skill_dir%/}" "$target"
+    # Provenance marker: prune only ever removes directories this repo deployed.
+    # Skills placed here by anything else (construct, npx skills add, by hand)
+    # are foreign and must survive untouched.
+    print -r -- "$MANAGED_MARKER" > "$target/.managed-by"
+    log "deployed skill '$name' -> $target ($label)"
+  done
+
+  # Prune: a skill deleted or renamed in the repo must stop firing on this
+  # device. Only prunes what this repo deployed; a skill from another source has
+  # no marker and is left alone.
+  [[ -d "$dest_expanded" ]] || return 0
+  for existing in "$dest_expanded"/*/(N); do
+    name=$(basename "${existing%/}")
+    [[ -d "$REPO_ROOT/skills/$name" ]] && continue
+    [[ -f "${existing%/}/.managed-by" ]] || continue
+    if (( DRY_RUN )); then
+      log "would prune orphaned skill '$name' from $dest_expanded ($label)"
+      continue
+    fi
+    backup_path "${existing%/}"
+    rm -rf "${existing%/}"
+    log "pruned orphaned skill '$name' from $dest_expanded ($label)"
+  done
+}
+
+log ""
+log "-- skills lint --"
+if ! "$SCRIPT_DIR/skills" lint; then
+  die "skills lint failed; fix the errors above before deploying (nothing was written)"
+fi
+
+log ""
+log "-- skills --"
+while IFS=$'\t' read -r label detect root; do
+  if ! tool_detected "$detect"; then
+    log "skip $label (not detected) -> $root"
+    continue
+  fi
+  deploy_skills "$root" "$label"
+done < <(skill_dest_rows)
+
+log ""
+log "-- core sync --"
+if (( DRY_RUN )); then
+  "$SCRIPT_DIR/sync" --dry-run
+else
+  "$SCRIPT_DIR/sync"
+fi

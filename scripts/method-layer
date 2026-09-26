@@ -1,0 +1,75 @@
+#!/usr/bin/env zsh
+# The method layer (intake, adversarial review, research, decision framing,
+# context mapping, requirements, writing voice) is owned and shipped by
+# construct, per manifests/skill-ownership.tsv. This repo does not copy those
+# skills. It checks that every detected skill root has them, and installs them
+# through construct's own installer when construct is available.
+#
+# Usage: method-layer check | install [--dry-run]
+
+set -euo pipefail
+source "$(dirname "${(%):-%x}")/lib.sh"
+
+owned_skills() {
+  owned_elsewhere_rows | awk -F'\t' '$1=="construct" {print $2}'
+}
+
+detected_roots() {
+  local label detect root
+  while IFS=$'\t' read -r label detect root; do
+    tool_detected "$detect" && print -r -- "$label"$'\t'"$(expand_path "$root")"
+  done < <(skill_dest_rows)
+}
+
+cmd="${1:-check}"
+dry=0
+[[ "${2:-}" == "--dry-run" ]] && dry=1
+
+case "$cmd" in
+  check)
+    missing_total=0
+    while IFS=$'\t' read -r label root; do
+      missing=()
+      for name in ${(f)"$(owned_skills)"}; do
+        [[ -f "$root/$name/SKILL.md" ]] || missing+=("$name")
+      done
+      if (( ${#missing} )); then
+        printf '  %-10s %-32s missing: %s\n' "$label" "$root" "${(j:, :)missing}"
+        missing_total=$(( missing_total + ${#missing} ))
+      else
+        printf '  %-10s %-32s complete\n' "$label" "$root"
+      fi
+    done < <(detected_roots)
+    if (( missing_total )); then
+      if command -v construct >/dev/null 2>&1; then
+        print -r -- "  fix: scripts/method-layer install"
+      else
+        print -r -- "  fix: npm install -g @geraldmaron/construct@alpha, then scripts/method-layer install"
+      fi
+      exit 1
+    fi
+    ;;
+
+  install)
+    command -v construct >/dev/null 2>&1 || {
+      log "construct is not installed, so the method layer cannot be installed."
+      log "install it with: npm install -g @geraldmaron/construct@alpha"
+      exit 1
+    }
+    while IFS=$'\t' read -r label root; do
+      for name in ${(f)"$(owned_skills)"}; do
+        if (( dry )); then
+          log "would install $name -> $root/$name (construct)"
+          continue
+        fi
+        backup_path "$root/$name"
+        construct skill install "$name" --dir="$root" --force >/dev/null
+        log "installed $name -> $root/$name (construct)"
+      done
+    done < <(detected_roots)
+    ;;
+
+  *)
+    die "usage: method-layer check | install [--dry-run]"
+    ;;
+esac

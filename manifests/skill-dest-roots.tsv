@@ -1,0 +1,8 @@
+label	detect	root
+# verified: 2026-08-22, bob 2026-09-25 (each path read from the vendor's own skills docs; see docs/tool-support.md)
+agents	true	~/.agents/skills
+claude	command -v claude	~/.claude/skills
+gemini	command -v gemini	~/.gemini/skills
+cursor	[ -d ~/.cursor ] || [ -d /Applications/Cursor.app ] || command -v cursor	~/.cursor/skills
+copilot	command -v copilot	~/.copilot/skills
+bob	[ -d ~/.bob ]	~/.bob/skills

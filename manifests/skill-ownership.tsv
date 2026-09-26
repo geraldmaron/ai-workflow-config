@@ -1,0 +1,15 @@
+# Which source owns which skill concept. Policy, checked by scripts/doctor.
+#
+# This repo distributes and verifies skills. It does not own every concept.
+# A concept owned elsewhere must not be re-implemented here: two skills that
+# fire on the same situation collide in the host's skills directory, and
+# whichever tool deployed last silently wins.
+#
+# owner    skill                      note
+construct	adversarial-review	challenging a decision before commitment
+construct	investigative-research	multi-source investigation with verification gates
+construct	decision-framing	choosing between real alternatives
+construct	intake	turning a messy request into an execution plan
+construct	context-mapping	understanding an unfamiliar system before acting
+construct	requirements-structuring	turning intent into a buildable requirements artifact
+construct	written-voice	house prose voice and per-genre document shapes

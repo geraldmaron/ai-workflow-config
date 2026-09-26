@@ -1,0 +1,174 @@
+#!/usr/bin/env zsh
+# Claude Code hooks and status line: install, remove, and verify.
+#
+# settings.json belongs to the app, so this script never owns the whole file.
+# install and uninstall touch only the hook entries and status line that point
+# at scripts this repo ships; every other key and every other hook survives.
+# check reports any configured hook whose script is missing.
+#
+# Usage: hooks check | install [--dry-run] | uninstall [--dry-run]
+
+set -euo pipefail
+source "$(dirname "${(%):-%x}")/lib.sh"
+
+SRC="$REPO_ROOT/extras/claude/hooks"
+STATUSLINE_SRC="$REPO_ROOT/extras/claude/statusline-command.sh"
+CLAUDE_HOME="$HOME/.claude"
+DEST="$CLAUDE_HOME/hooks"
+STATUSLINE_DEST="$CLAUDE_HOME/statusline-command.sh"
+SETTINGS="$CLAUDE_HOME/settings.json"
+
+# The hook wiring this repo owns. HOOKS is replaced with the install directory.
+hook_spec() {
+  cat <<'JSON'
+{
+  "PreToolUse": [
+    { "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "node \"HOOKS/block-no-verify.mjs\"", "timeout": 5 }] }
+  ],
+  "PostToolUse": [
+    { "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{ "type": "command", "command": "node \"HOOKS/validate-written-file.mjs\"", "timeout": 5 }] },
+    { "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{ "type": "command", "command": "node \"HOOKS/scan-secrets.mjs\"", "timeout": 10 }] },
+    { "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{ "type": "command", "command": "node \"HOOKS/skill-duplication-guard.mjs\"", "timeout": 5 }] }
+  ],
+  "UserPromptSubmit": [
+    { "hooks": [{ "type": "command", "command": "node \"HOOKS/session-cost-guard.mjs\"", "timeout": 5 }] }
+  ]
+}
+JSON
+}
+
+# edit_settings <install|uninstall> - merge or remove this repo's entries.
+# An entry is ours when every command in it references a script under $DEST
+# that this repo ships, or the status line script this repo ships.
+edit_settings() {
+  local mode="$1" spec_file
+  spec_file=$(mktemp)
+  hook_spec | sed "s|HOOKS|$DEST|g" > "$spec_file"
+  node - "$mode" "$SETTINGS" "$spec_file" "$DEST" "$STATUSLINE_DEST" ${SRC}/*.mjs(N:t) <<'NODE'
+const fs = require("fs");
+const [mode, settingsPath, specPath, dest, statusline, ...shipped] = process.argv.slice(2);
+const settings = fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, "utf8")) : {};
+const ours = (cmd = "") => shipped.some((f) => cmd.includes(`${dest}/${f}`));
+const hooks = settings.hooks ?? {};
+for (const event of Object.keys(hooks)) {
+  hooks[event] = (hooks[event] ?? []).filter(
+    (entry) => !(entry.hooks ?? []).length || !(entry.hooks ?? []).every((h) => ours(h.command)),
+  );
+  if (!hooks[event].length) delete hooks[event];
+}
+const statusOurs = (settings.statusLine?.command ?? "").includes(statusline);
+if (mode === "install") {
+  const spec = JSON.parse(fs.readFileSync(specPath, "utf8"));
+  for (const [event, entries] of Object.entries(spec)) hooks[event] = [...(hooks[event] ?? []), ...entries];
+  if (!settings.statusLine || statusOurs) {
+    settings.statusLine = { type: "command", command: `bash "${statusline}"` };
+  } else {
+    console.error("kept the existing statusLine (not this repo's); ours is installed but not wired");
+  }
+} else if (statusOurs) {
+  delete settings.statusLine;
+}
+if (Object.keys(hooks).length) settings.hooks = hooks;
+else delete settings.hooks;
+fs.mkdirSync(require("path").dirname(settingsPath), { recursive: true });
+fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+console.error(`${mode === "install" ? "merged" : "removed"} this repo's hooks in ${settingsPath} (other settings untouched)`);
+NODE
+  rm -f "$spec_file"
+}
+
+require_node() {
+  command -v node >/dev/null 2>&1 || die "node is not installed; Claude Code hooks need it (see ./install for the install command)"
+}
+
+cmd="${1:-check}"
+dry=0
+[[ "${2:-}" == "--dry-run" ]] && dry=1
+
+case "$cmd" in
+  check)
+    [[ -f "$SETTINGS" ]] || { print -r -- "no settings.json at $SETTINGS"; exit 0 }
+    command -v node >/dev/null 2>&1 || { print -r -- "node not found; cannot read hook wiring"; exit 0 }
+    node - "$SETTINGS" <<'NODE'
+const fs = require("fs");
+const settings = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const rows = [];
+for (const [event, entries] of Object.entries(settings.hooks ?? {}))
+  for (const entry of entries ?? [])
+    for (const h of entry.hooks ?? []) rows.push([event, h.command ?? ""]);
+if (settings.statusLine?.command) rows.push(["statusLine", settings.statusLine.command]);
+if (!rows.length) { console.log("no hooks configured"); process.exit(0); }
+let broken = 0;
+for (const [event, command] of rows) {
+  const m = command.match(/\/[^"\s]+\.(mjs|js|sh|py)/);
+  let status;
+  if (!m) status = "no script path found";
+  else if (fs.existsSync(m[0])) status = "ok";
+  else { status = "MISSING FILE"; broken++; }
+  const label = m ? m[0].replace(process.env.HOME, "~") : command.slice(0, 40) + "...";
+  const mark = status === "ok" ? "ok     " : status === "MISSING FILE" ? "BROKEN " : "check  ";
+  console.log(`${mark} ${event.padEnd(17)} ${label}  ${status === "ok" ? "" : status}`);
+}
+if (broken) {
+  console.log(`\n${broken} hook(s) point at files that do not exist. Every matching tool call fails.`);
+  console.log("Fix: scripts/hooks install");
+  process.exit(1);
+}
+NODE
+    ;;
+
+  install)
+    [[ -d "$SRC" ]] || die "no hook sources at $SRC"
+    if (( dry )); then
+      for f in "$SRC"/*.mjs(N); do log "would install ${f:t} -> $DEST/${f:t}"; done
+      log "would install ${STATUSLINE_SRC:t} -> $STATUSLINE_DEST"
+      log "would merge this repo's hooks and status line into $SETTINGS (everything else preserved)"
+      exit 0
+    fi
+    require_node
+    mkdir -p "$DEST"
+    for f in "$SRC"/*.mjs(N); do
+      backup_path "$DEST/${f:t}"
+      cp "$f" "$DEST/${f:t}"
+      chmod +x "$DEST/${f:t}"
+      log "installed ${f:t} -> $DEST/${f:t}"
+    done
+    backup_path "$STATUSLINE_DEST"
+    cp "$STATUSLINE_SRC" "$STATUSLINE_DEST"
+    chmod +x "$STATUSLINE_DEST"
+    log "installed ${STATUSLINE_SRC:t} -> $STATUSLINE_DEST"
+    backup_path "$SETTINGS"
+    edit_settings install
+    log "done. Restart Claude Code, then run 'scripts/hooks check'"
+    ;;
+
+  uninstall)
+    if (( dry )); then
+      for f in "$SRC"/*.mjs(N); do [[ -f "$DEST/${f:t}" ]] && log "would remove $DEST/${f:t}"; done
+      [[ -f "$STATUSLINE_DEST" ]] && log "would remove $STATUSLINE_DEST"
+      [[ -f "$SETTINGS" ]] && log "would remove this repo's hooks and status line from $SETTINGS"
+      exit 0
+    fi
+    if [[ -f "$SETTINGS" ]]; then
+      require_node
+      backup_path "$SETTINGS"
+      edit_settings uninstall
+    fi
+    for f in "$SRC"/*.mjs(N) "$STATUSLINE_SRC"; do
+      target="$DEST/${f:t}"
+      [[ "$f" == "$STATUSLINE_SRC" ]] && target="$STATUSLINE_DEST"
+      [[ -f "$target" ]] || continue
+      backup_path "$target"
+      rm -f "$target"
+      log "removed $target"
+    done
+    ;;
+
+  *)
+    die "usage: hooks check | install [--dry-run] | uninstall [--dry-run]"
+    ;;
+esac
